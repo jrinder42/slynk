@@ -6,6 +6,12 @@
 bun tauri dev
 ```
 
+To see if the rust backend compiles
+
+```
+cargo check
+```
+
 https://v2.tauri.app/start/create-project/#using-create-tauri-app
 
 Options
