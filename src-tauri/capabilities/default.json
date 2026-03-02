@@ -11,6 +11,18 @@
     "sql:default",
     "fs:default",
     "dialog:default",
-    "store:default"
-  ]
-}
+    "store:default",
+        "shell:default",
+        {
+          "identifier": "shell:allow-execute",
+          "allow": [
+            {
+              "args": true,
+              "cmd": "binaries/rclone",
+              "sidecar": true
+            }
+          ]
+        }
+      ]
+    }
+    
