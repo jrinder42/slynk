@@ -3,17 +3,49 @@
 
   let name = $state("");
   let greetMsg = $state("");
+  let authStatus = $state("Not connected");
+  let rcloneVersion = $state("Checking...");
 
   async function greet(event: Event) {
     event.preventDefault();
     greetMsg = await invoke("greet", { name });
   }
+
+  async function login() {
+    try {
+      authStatus = "Starting rclone authentication...";
+      await invoke("rclone_login");
+      authStatus = "Connected!";
+    } catch (error) {
+      authStatus = `Error: ${error}`;
+    }
+  }
+
+  async function checkRclone() {
+    try {
+      rcloneVersion = await invoke("test_rclone");
+    } catch (error) {
+      rcloneVersion = `Error: ${error}`;
+    }
+  }
+
+  $effect(() => {
+    checkRclone();
+  });
 </script>
 
 <main class="container">
   <h1>slynk</h1>
 
   <div class="content">
+    <div class="auth-section">
+      <p style="font-size: 0.8rem; opacity: 0.7;">{rcloneVersion}</p>
+      <p>Status: {authStatus}</p>
+      <button onclick={login} disabled={authStatus === 'Connected!'}>
+        Connect to Google Drive
+      </button>
+    </div>
+
     <form class="row" onsubmit={greet}>
       <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
       <button type="submit">Greet</button>
@@ -44,6 +76,24 @@ h1 {
   font-size: 2rem;
   margin: 0 0 24px 0;
   text-align: center;
+}
+
+.auth-section {
+  background: white;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  border: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .auth-section {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+  }
 }
 
 .content {
