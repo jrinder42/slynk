@@ -77,10 +77,12 @@ async fn rclone_login(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn start_backup(app: tauri::AppHandle, path: String) -> Result<String, String> {
+async fn start_backup(app: tauri::AppHandle, paths: Vec<String>, remote_folder: String) -> Result<String, String> {
     let sync_manager = sync::SyncManager::new(app);
-    sync_manager.start_watcher(std::path::PathBuf::from(path)).map_err(|e| e.to_string())?;
-    Ok("Backup monitoring started".to_string())
+    for path in paths {
+        sync_manager.start_watcher(std::path::PathBuf::from(path), remote_folder.clone()).map_err(|e| e.to_string())?;
+    }
+    Ok("Backup monitoring started for all selected items".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
