@@ -77,6 +77,20 @@ async fn rclone_login(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn rclone_logout(app: tauri::AppHandle) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("rclone.conf");
+
+    if data_dir.exists() {
+        std::fs::remove_file(data_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn start_backup(app: tauri::AppHandle, paths: Vec<String>, remote_folder: String) -> Result<String, String> {
     let sync_manager = sync::SyncManager::new(app);
     for path in paths {
@@ -95,7 +109,13 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, test_rclone, rclone_login, start_backup])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            test_rclone,
+            rclone_login,
+            rclone_logout,
+            start_backup
+        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

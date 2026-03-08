@@ -10,22 +10,15 @@
     enabled: boolean;
   }
 
-  interface SyncEvent {
-    path: string;
-    timestamp: string;
-    status: string;
-  }
-
   let authStatus = $state("Not connected");
   let rcloneVersion = $state("Checking...");
   let backupItems = $state<BackupItem[]>([]);
   let backupStatus = $state("Idle");
   let remoteFolder = $state("slynk_backup");
   let isSyncing = $state(false);
-  let syncLogs = $state<SyncEvent[]>([]);
 
   onMount(() => {
-    // Listen for sync events from the Rust backend
+    // Listen for sync status events
     const unlistenStart = listen("sync-start", () => {
       isSyncing = true;
       backupStatus = "Syncing...";
@@ -34,14 +27,10 @@
       isSyncing = false;
       backupStatus = "Monitoring...";
     });
-    const unlistenEvent = listen<SyncEvent>("sync-event", (event) => {
-      syncLogs = [event.payload, ...syncLogs].slice(0, 50);
-    });
 
     return () => {
       unlistenStart.then(fn => fn());
       unlistenEnd.then(fn => fn());
-      unlistenEvent.then(fn => fn());
     };
   });
 
@@ -52,6 +41,15 @@
       authStatus = "Connected!";
     } catch (error) {
       authStatus = `Error: ${error}`;
+    }
+  }
+
+  async function logout() {
+    try {
+      await invoke("rclone_logout");
+      authStatus = "Not connected";
+    } catch (error) {
+      console.error("Logout error:", error);
     }
   }
 
@@ -118,9 +116,14 @@
         {/if}
       </div>
       <p>Status: <strong>{authStatus}</strong></p>
-      <button onclick={login} disabled={authStatus === 'Connected!'}>
-        Connect to Google Drive
-      </button>
+      <div class="button-row">
+        <button onclick={login} disabled={authStatus === 'Connected!'}>
+          {authStatus === 'Connected!' ? 'Connected' : 'Connect to Google Drive'}
+        </button>
+        {#if authStatus === 'Connected!'}
+          <button class="danger-btn" onclick={logout}>Disconnect</button>
+        {/if}
+      </div>
     </div>
 
     <div class="section">
@@ -148,7 +151,9 @@
               <input type="checkbox" bind:checked={item.enabled} />
               <div class="item-info">
                 <span class="item-name">{item.path.split('/').pop() || item.path.split('\\').pop()}</span>
-                <span class="item-path">{item.path}</span>
+                <div class="item-path-container">
+                  <span class="item-path">{item.path}</span>
+                </div>
               </div>
               <button class="remove-btn" onclick={() => removeItem(item.path)}>×</button>
             </div>
@@ -167,21 +172,6 @@
         </button>
       </div>
     </div>
-
-    {#if syncLogs.length > 0}
-      <div class="section">
-        <h3>Recent Activity</h3>
-        <div class="log-list">
-          {#each syncLogs as log}
-            <div class="log-row">
-              <span class="log-time">[{log.timestamp}]</span>
-              <span class="log-status {log.status.toLowerCase()}">{log.status}</span>
-              <span class="log-path">{log.path}</span>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
   </div>
 </main>
 
@@ -303,7 +293,7 @@ h1 {
   background: #fdfdfd;
   border: 1px solid #eee;
   border-radius: 8px;
-  max-height: 200px;
+  max-height: 250px;
   overflow-y: auto;
   margin-bottom: 16px;
 }
@@ -348,12 +338,15 @@ h1 {
   text-overflow: ellipsis;
 }
 
+.item-path-container {
+  width: 100%;
+  overflow-x: auto;
+}
+
 .item-path {
   font-size: 0.7rem;
   opacity: 0.6;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .remove-btn {
@@ -406,35 +399,13 @@ h1 {
   background-color: #ccc;
 }
 
-.log-list {
-  background: #000;
-  color: #00ff00;
-  font-family: 'Courier New', Courier, monospace;
-  padding: 12px;
-  border-radius: 8px;
-  max-height: 200px;
-  overflow-y: auto;
-  font-size: 0.75rem;
+.danger-btn {
+  color: #ff4d4f;
+  border-color: #ffa39e;
 }
 
-.log-row {
-  margin-bottom: 4px;
-  display: flex;
-  gap: 8px;
-}
-
-.log-time {
-  opacity: 0.7;
-}
-
-.log-status.success { color: #00ff00; }
-.log-status.failed { color: #ff4d4f; }
-
-.log-path {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.danger-btn:hover {
+  background-color: #fff1f0;
 }
 
 input[type="checkbox"] {
