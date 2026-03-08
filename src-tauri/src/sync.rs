@@ -1,18 +1,10 @@
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Emitter};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::mpsc;
-
-#[derive(Clone, Serialize)]
-pub struct SyncEvent {
-    pub path: String,
-    pub timestamp: String,
-    pub status: String,
-}
 
 pub struct SyncManager {
     app: AppHandle,
@@ -143,17 +135,12 @@ pub async fn trigger_sync(app: AppHandle, root_path: PathBuf, changed_path: Path
         .await
         .map_err(|e| e.to_string())?;
 
-    let status = if output.status.success() {
-        "Success".to_string()
+    if output.status.success() {
+        println!("[{}] SUCCESS: Synced {} to {}", timestamp, path_display, remote_dest);
     } else {
-        "Failed".to_string()
-    };
-
-    let _ = app.emit("sync-event", SyncEvent {
-        path: path_display,
-        timestamp,
-        status,
-    });
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        eprintln!("[{}] FAILED: {} - Error: {}", timestamp, path_display, stderr);
+    }
 
     let _ = app.emit("sync-end", ());
     Ok(())
