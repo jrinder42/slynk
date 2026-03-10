@@ -16,9 +16,29 @@
   let backupStatus = $state("Idle");
   let remoteFolder = $state("slynk_backup");
   let isSyncing = $state(false);
+  let isInitialLoading = $state(true);
 
-  onMount(() => {
-    // Listen for sync status events
+  onMount(async () => {
+    // 1. Load initial settings
+    try {
+      const savedRemote = await invoke("load_config", { key: "remoteFolder" });
+      if (savedRemote) remoteFolder = savedRemote as string;
+
+      const savedItems = await invoke("load_config", { key: "backupItems" });
+      if (savedItems) backupItems = savedItems as BackupItem[];
+
+      // 2. Resume monitoring if we have enabled items
+      const enabledPaths = backupItems.filter(i => i.enabled).map(i => i.path);
+      if (enabledPaths.length > 0) {
+        await startMonitoring();
+      }
+    } catch (error) {
+      console.error("Failed to load settings:", error);
+    } finally {
+      isInitialLoading = false;
+    }
+
+    // 3. Listen for sync status events
     const unlistenStart = listen("sync-start", () => {
       isSyncing = true;
       backupStatus = "Syncing...";
@@ -32,6 +52,19 @@
       unlistenStart.then(fn => fn());
       unlistenEnd.then(fn => fn());
     };
+  });
+
+  // 4. Auto-save settings whenever they change
+  $effect(() => {
+    if (!isInitialLoading) {
+      invoke("save_config", { key: "backupItems", value: backupItems });
+    }
+  });
+
+  $effect(() => {
+    if (!isInitialLoading) {
+      invoke("save_config", { key: "remoteFolder", value: remoteFolder });
+    }
   });
 
   async function login() {
@@ -136,7 +169,12 @@
     </div>
 
     <div class="section">
-      <h3>2. Local Items</h3>
+      <div class="header-with-status">
+        <h3>2. Local Items</h3>
+        {#if backupItems.length > 0}
+          <button class="danger-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick={() => backupItems = []}>Clear All</button>
+        {/if}
+      </div>
       <div class="button-row">
         <button onclick={() => addItems(true)}>+ Add Folder</button>
         <button onclick={() => addItems(false)}>+ Add File</button>
@@ -386,17 +424,31 @@ h1 {
 
 .primary-btn {
   background-color: #007bff;
-  color: white;
+  color: #fff;
   border: none;
   font-weight: 600;
 }
 
-.primary-btn:hover {
-  background-color: #0056b3;
+.primary-btn:hover:not(:disabled) {
+  background-color: #0069d9;
 }
 
 .primary-btn:disabled {
   background-color: #ccc;
+  color: #888;
+}
+
+@media (prefers-color-scheme: dark) {
+  .primary-btn {
+    background-color: #0056b3;
+  }
+  .primary-btn:hover:not(:disabled) {
+    background-color: #004a99;
+  }
+  .primary-btn:disabled {
+    background-color: #444;
+    color: #888;
+  }
 }
 
 .danger-btn {
@@ -404,8 +456,18 @@ h1 {
   border-color: #ffa39e;
 }
 
-.danger-btn:hover {
+.danger-btn:hover:not(:disabled) {
   background-color: #fff1f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .danger-btn {
+    border-color: #822a2a;
+    background-color: transparent;
+  }
+  .danger-btn:hover:not(:disabled) {
+    background-color: #4c1d1d;
+  }
 }
 
 input[type="checkbox"] {

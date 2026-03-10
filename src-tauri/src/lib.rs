@@ -99,6 +99,22 @@ async fn start_backup(app: tauri::AppHandle, paths: Vec<String>, remote_folder: 
     Ok("Backup monitoring started for all selected items".to_string())
 }
 
+#[tauri::command]
+async fn save_config(app: tauri::AppHandle, key: String, value: serde_json::Value) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store(".settings.dat").map_err(|e| e.to_string())?;
+    store.set(key, value);
+    store.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_config(app: tauri::AppHandle, key: String) -> Result<serde_json::Value, String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store(".settings.dat").map_err(|e| e.to_string())?;
+    Ok(store.get(key).unwrap_or(serde_json::Value::Null))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -114,7 +130,9 @@ pub fn run() {
             test_rclone,
             rclone_login,
             rclone_logout,
-            start_backup
+            start_backup,
+            save_config,
+            load_config
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
