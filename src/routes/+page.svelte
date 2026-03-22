@@ -19,7 +19,19 @@
   let isInitialLoading = $state(true);
 
   onMount(async () => {
-    // 1. Load initial settings
+    // 1. Check if we're authenticated
+    try {
+      const authenticated = await invoke("is_authenticated");
+      if (authenticated) {
+        authStatus = "Connected!";
+      } else {
+        authStatus = "Not connected";
+      }
+    } catch (error) {
+      console.error("Failed to check auth status:", error);
+    }
+
+    // 2. Load initial settings
     try {
       const savedRemote = await invoke("load_config", { key: "remoteFolder" });
       if (savedRemote) remoteFolder = savedRemote as string;
@@ -27,10 +39,12 @@
       const savedItems = await invoke("load_config", { key: "backupItems" });
       if (savedItems) backupItems = savedItems as BackupItem[];
 
-      // 2. Resume monitoring if we have enabled items
-      const enabledPaths = backupItems.filter(i => i.enabled).map(i => i.path);
-      if (enabledPaths.length > 0) {
-        await startMonitoring();
+      // 3. Resume monitoring if we're authenticated AND have enabled items
+      if (authStatus === "Connected!") {
+        const enabledPaths = backupItems.filter(i => i.enabled).map(i => i.path);
+        if (enabledPaths.length > 0) {
+          await startMonitoring();
+        }
       }
     } catch (error) {
       console.error("Failed to load settings:", error);
@@ -81,6 +95,7 @@
     try {
       await invoke("rclone_logout");
       authStatus = "Not connected";
+      backupStatus = "Idle";
     } catch (error) {
       console.error("Logout error:", error);
     }
@@ -100,16 +115,25 @@
       multiple: true,
     });
     
-    if (selected && Array.isArray(selected)) {
-      selected.forEach(path => {
-        if (!backupItems.find(item => item.path === path)) {
-          backupItems.push({ path, isDirectory, enabled: true });
-        }
+    if (selected) {
+      const paths = Array.isArray(selected) ? selected : [selected];
+      
+      paths.forEach(newPath => {
+        // 1. Check if the new path is a subfolder of something already in the list
+        const isRedundant = backupItems.some(existing => 
+          newPath.startsWith(existing.path + '/') || newPath.startsWith(existing.path + '\\') || newPath === existing.path
+        );
+
+        if (isRedundant) return;
+
+        // 2. If the new path is a PARENT of existing items, remove the redundant children
+        backupItems = backupItems.filter(existing => 
+          !(existing.path.startsWith(newPath + '/') || existing.path.startsWith(newPath + '\\'))
+        );
+
+        // 3. Add the new path
+        backupItems.push({ path: newPath, isDirectory, enabled: true });
       });
-    } else if (selected && typeof selected === "string") {
-      if (!backupItems.find(item => item.path === selected)) {
-        backupItems.push({ path: selected, isDirectory, enabled: true });
-      }
     }
   }
 
@@ -131,6 +155,24 @@
   function removeItem(path: string) {
     backupItems = backupItems.filter(i => i.path !== path);
   }
+
+  // Group items by their parent directory for a "tree-like" view
+  let groupedItems = $derived.by(() => {
+    const groups: Record<string, BackupItem[]> = {};
+    backupItems.forEach(item => {
+      // Normalize separators for splitting
+      const normalizedPath = item.path.replace(/\\/g, '/');
+      const parts = normalizedPath.split('/');
+      
+      // If it's a file at the root of the disk (unlikely but possible), handle it
+      let parent = parts.slice(0, -1).join('/') || '/';
+      
+      // Keep original path for the item, but group by normalized parent
+      if (!groups[parent]) groups[parent] = [];
+      groups[parent].push(item);
+    });
+    return groups;
+  });
 
   $effect(() => {
     checkRclone();
@@ -181,19 +223,27 @@
       </div>
 
       <div class="item-list">
-        {#if backupItems.length === 0}
+        {#if Object.keys(groupedItems).length === 0}
           <p class="empty-msg">No items selected yet.</p>
         {:else}
-          {#each backupItems as item}
-            <div class="item-row">
-              <input type="checkbox" bind:checked={item.enabled} />
-              <div class="item-info">
-                <span class="item-name">{item.path.split('/').pop() || item.path.split('\\').pop()}</span>
-                <div class="item-path-container">
-                  <span class="item-path">{item.path}</span>
-                </div>
+          {#each Object.entries(groupedItems) as [parent, items]}
+            <div class="tree-group">
+              <div class="tree-parent">
+                <span class="icon">📁</span>
+                <span class="parent-path">{parent}</span>
               </div>
-              <button class="remove-btn" onclick={() => removeItem(item.path)}>×</button>
+              <div class="tree-children">
+                {#each items as item}
+                  <div class="item-row tree-item">
+                    <input type="checkbox" bind:checked={item.enabled} />
+                    <span class="icon">{item.isDirectory ? '📁' : '📄'}</span>
+                    <div class="item-info">
+                      <span class="item-name">{item.path.split(/[\/\\]/).pop()}</span>
+                    </div>
+                    <button class="remove-btn" onclick={() => removeItem(item.path)}>×</button>
+                  </div>
+                {/each}
+              </div>
             </div>
           {/each}
         {/if}
@@ -331,7 +381,7 @@ h1 {
   background: #fdfdfd;
   border: 1px solid #eee;
   border-radius: 8px;
-  max-height: 250px;
+  max-height: 300px;
   overflow-y: auto;
   margin-bottom: 16px;
 }
@@ -343,22 +393,60 @@ h1 {
   }
 }
 
-.item-row {
-  display: flex;
-  align-items: center;
-  padding: 10px 12px;
+.tree-group {
   border-bottom: 1px solid #eee;
-  gap: 12px;
 }
 
 @media (prefers-color-scheme: dark) {
-  .item-row {
+  .tree-group {
     border-bottom-color: #3a3a3a;
   }
 }
 
-.item-row:last-child {
-  border-bottom: none;
+.tree-parent {
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.02);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #666;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tree-parent {
+    background: rgba(255,255,255,0.03);
+    color: #aaa;
+  }
+}
+
+.tree-children {
+  padding-left: 12px;
+}
+
+.item-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 12px;
+}
+
+.tree-item {
+  border-left: 2px solid #eee;
+  margin-left: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tree-item {
+    border-left-color: #3a3a3a;
+  }
+}
+
+.icon {
+  font-size: 1rem;
 }
 
 .item-info {
@@ -374,17 +462,6 @@ h1 {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.item-path-container {
-  width: 100%;
-  overflow-x: auto;
-}
-
-.item-path {
-  font-size: 0.7rem;
-  opacity: 0.6;
-  white-space: nowrap;
 }
 
 .remove-btn {
