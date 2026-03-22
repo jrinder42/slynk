@@ -91,7 +91,27 @@ async fn rclone_logout(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn is_authenticated(app: tauri::AppHandle) -> Result<bool, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("rclone.conf");
+    Ok(data_dir.exists())
+}
+
+#[tauri::command]
 async fn start_backup(app: tauri::AppHandle, paths: Vec<String>, remote_folder: String) -> Result<String, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?
+        .join("rclone.conf");
+
+    if !data_dir.exists() {
+        return Err("Not authenticated with Google Drive. Please log in first.".to_string());
+    }
+
     let sync_manager = sync::SyncManager::new(app);
     for path in paths {
         sync_manager.start_watcher(std::path::PathBuf::from(path), remote_folder.clone()).map_err(|e| e.to_string())?;
@@ -128,6 +148,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             test_rclone,
+            is_authenticated,
             rclone_login,
             rclone_logout,
             start_backup,
