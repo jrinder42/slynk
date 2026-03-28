@@ -1,20 +1,23 @@
 mod sync;
+mod db;
 
+use std::sync::Mutex;
 use tauri_plugin_shell::ShellExt;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Manager, State,
 };
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+// Application state to hold the SyncManager instance
+struct AppState {
+    sync_manager: Mutex<Option<sync::SyncManager>>,
+    db: Mutex<db::Db>,
 }
 
 #[tauri::command]
 async fn test_rclone(app: tauri::AppHandle) -> Result<String, String> {
+    // Check rclone version to verify the sidecar is bundled and working
     let output = app
         .shell()
         .sidecar("rclone")
@@ -32,6 +35,17 @@ async fn test_rclone(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn is_authenticated(app: tauri::AppHandle) -> Result<bool, String> {
+    // Check if the rclone.conf file exists in the app's data directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("rclone.conf");
+    Ok(data_dir.exists())
+}
+
+#[tauri::command]
 async fn rclone_login(app: tauri::AppHandle) -> Result<String, String> {
     let data_dir = app
         .path()
@@ -39,18 +53,14 @@ async fn rclone_login(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .join("rclone.conf");
 
-    // Ensure parent directory exists
+    // Ensure parent directory exists for the configuration file
     if let Some(parent) = data_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     let config_path = data_dir.to_string_lossy().to_string();
 
-    // Run rclone config create
-    // We use --config to specify our own config file location
-    // We use gdrive as the remote name
-    // drive is the type
-    // scope is drive.file
+    // Run rclone config create to initiate Google Drive authentication
     let output = app
         .shell()
         .sidecar("rclone")
@@ -77,7 +87,49 @@ async fn rclone_login(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn rclone_logout(app: tauri::AppHandle) -> Result<(), String> {
+async fn start_backup(app: tauri::AppHandle, state: State<'_, AppState>, paths: Vec<String>, remote_folder: String, batch_size: u32) -> Result<String, String> {
+    // Ensure the user is authenticated before starting any background work
+    let authenticated = is_authenticated(app.clone()).await?;
+    if !authenticated {
+        return Err("Not authenticated with Google Drive. Please log in first.".to_string());
+    }
+
+    let mut sm_guard = state.sync_manager.lock().unwrap();
+    // Lazy-initialize the SyncManager
+    if sm_guard.is_none() {
+        *sm_guard = Some(sync::SyncManager::new(app.clone()));
+    }
+    
+    // Start watching each selected path
+    if let Some(ref sm) = *sm_guard {
+        for path in paths {
+            sm.start_watcher(std::path::PathBuf::from(path), remote_folder.clone(), batch_size).map_err(|e| e.to_string())?;
+        }
+    }
+    
+    Ok("Backup monitoring started for all selected items".to_string())
+}
+
+#[tauri::command]
+async fn stop_all_monitoring(state: State<'_, AppState>) -> Result<(), String> {
+    // Clearing the state drops the SyncManager and its associated watchers
+    let mut sm_guard = state.sync_manager.lock().unwrap();
+    *sm_guard = None; 
+    Ok(())
+}
+
+#[tauri::command]
+async fn rclone_logout(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 1. Stop all active background monitoring
+    stop_all_monitoring(state.clone()).await?;
+
+    // 2. Clear the persistent file index
+    {
+        let db_guard = state.db.lock().unwrap();
+        db_guard.clear_index().map_err(|e| e.to_string())?;
+    }
+
+    // 3. Remove the authentication tokens
     let data_dir = app
         .path()
         .app_data_dir()
@@ -91,32 +143,9 @@ async fn rclone_logout(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn is_authenticated(app: tauri::AppHandle) -> Result<bool, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("rclone.conf");
-    Ok(data_dir.exists())
-}
-
-#[tauri::command]
-async fn start_backup(app: tauri::AppHandle, paths: Vec<String>, remote_folder: String) -> Result<String, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?
-        .join("rclone.conf");
-
-    if !data_dir.exists() {
-        return Err("Not authenticated with Google Drive. Please log in first.".to_string());
-    }
-
-    let sync_manager = sync::SyncManager::new(app);
-    for path in paths {
-        sync_manager.start_watcher(std::path::PathBuf::from(path), remote_folder.clone()).map_err(|e| e.to_string())?;
-    }
-    Ok("Backup monitoring started for all selected items".to_string())
+async fn remove_from_index(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let db_guard = state.db.lock().unwrap();
+    db_guard.remove_path(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -143,27 +172,27 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            greet,
-            test_rclone,
-            is_authenticated,
-            rclone_login,
-            rclone_logout,
-            start_backup,
-            save_config,
-            load_config
-        ])
         .setup(|app| {
+            // Initialize the SQLite database in the app data directory
+            let data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            std::fs::create_dir_all(&data_dir).expect("Failed to create app data dir");
+            let db_path = data_dir.join("slynk_index.db");
+            let db = db::Db::new(&db_path).expect("Failed to initialize database");
+
+            // Manage application state
+            app.manage(AppState {
+                sync_manager: Mutex::new(None),
+                db: Mutex::new(db),
+            });
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Create a simple menu with a "Quit" item
+            // Tray configuration
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit_item])?;
 
-            // Build the tray icon
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip("slynk")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -194,6 +223,17 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            test_rclone,
+            is_authenticated,
+            rclone_login,
+            rclone_logout,
+            start_backup,
+            stop_all_monitoring,
+            remove_from_index,
+            save_config,
+            load_config
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
