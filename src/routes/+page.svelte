@@ -15,8 +15,15 @@
   let backupItems = $state<BackupItem[]>([]);
   let backupStatus = $state("Idle");
   let remoteFolder = $state("slynk_backup");
+  let batchSize = $state(1000);
+  let pendingBatchSize = $state(1000);
+  let showSavedBatch = $state(false);
   let isSyncing = $state(false);
   let isInitialLoading = $state(true);
+  let syncProgress = $state(0);
+  let syncSpeed = $state("");
+  let syncEta = $state("");
+  let currentFiles = $state<string[]>([]);
 
   onMount(async () => {
     // 1. Check if we're authenticated
@@ -36,6 +43,12 @@
       const savedRemote = await invoke("load_config", { key: "remoteFolder" });
       if (savedRemote) remoteFolder = savedRemote as string;
 
+      const savedBatch = await invoke("load_config", { key: "batchSize" });
+      if (savedBatch) {
+        batchSize = savedBatch as number;
+        pendingBatchSize = batchSize;
+      }
+
       const savedItems = await invoke("load_config", { key: "backupItems" });
       if (savedItems) backupItems = savedItems as BackupItem[];
 
@@ -52,18 +65,30 @@
       isInitialLoading = false;
     }
 
-    // 3. Listen for sync status events
+    // 4. Listen for sync status events
     const unlistenStart = listen("sync-start", () => {
       isSyncing = true;
+      syncProgress = 0;
+      currentFiles = [];
       backupStatus = "Syncing...";
+    });
+    const unlistenProgress = listen("sync-progress", (event: any) => {
+      const data = event.payload;
+      syncProgress = data.percentage;
+      syncSpeed = data.speed;
+      syncEta = data.eta;
+      currentFiles = data.current_files;
     });
     const unlistenEnd = listen("sync-end", () => {
       isSyncing = false;
+      syncProgress = 0;
+      currentFiles = [];
       backupStatus = "Monitoring...";
     });
 
     return () => {
       unlistenStart.then(fn => fn());
+      unlistenProgress.then(fn => fn());
       unlistenEnd.then(fn => fn());
     };
   });
@@ -81,11 +106,26 @@
     }
   });
 
+  async function saveBatchSize() {
+    batchSize = pendingBatchSize;
+    await invoke("save_config", { key: "batchSize", value: batchSize });
+    showSavedBatch = true;
+    setTimeout(() => showSavedBatch = false, 1500);
+  }
+
+  function handleBatchKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      saveBatchSize();
+    }
+  }
+
   async function login() {
     try {
       authStatus = "Starting rclone authentication...";
       await invoke("rclone_login");
       authStatus = "Connected!";
+      // Auto-start monitoring after login
+      await startMonitoring();
     } catch (error) {
       authStatus = `Error: ${error}`;
     }
@@ -95,7 +135,6 @@
     try {
       await invoke("rclone_logout");
       authStatus = "Not connected";
-      backupStatus = "Idle";
     } catch (error) {
       console.error("Logout error:", error);
     }
@@ -145,7 +184,8 @@
       backupStatus = "Monitoring...";
       await invoke("start_backup", { 
         paths: enabledPaths,
-        remoteFolder 
+        remoteFolder,
+        batchSize
       });
     } catch (error) {
       backupStatus = `Error: ${error}`;
@@ -154,25 +194,9 @@
 
   function removeItem(path: string) {
     backupItems = backupItems.filter(i => i.path !== path);
+    // Also remove from the SQLite index to keep it clean
+    invoke("remove_from_index", { path });
   }
-
-  // Group items by their parent directory for a "tree-like" view
-  let groupedItems = $derived.by(() => {
-    const groups: Record<string, BackupItem[]> = {};
-    backupItems.forEach(item => {
-      // Normalize separators for splitting
-      const normalizedPath = item.path.replace(/\\/g, '/');
-      const parts = normalizedPath.split('/');
-      
-      // If it's a file at the root of the disk (unlikely but possible), handle it
-      let parent = parts.slice(0, -1).join('/') || '/';
-      
-      // Keep original path for the item, but group by normalized parent
-      if (!groups[parent]) groups[parent] = [];
-      groups[parent].push(item);
-    });
-    return groups;
-  });
 
   $effect(() => {
     checkRclone();
@@ -186,11 +210,20 @@
     <div class="section auth-section">
       <div class="header-with-status">
         <p class="version-label">{rcloneVersion}</p>
-        {#if isSyncing}
-          <div class="spinner"></div>
-        {/if}
       </div>
       <p>Status: <strong>{authStatus}</strong></p>
+      
+      {#if isSyncing}
+        <div class="sync-progress-container">
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" style="width: {syncProgress}%"></div>
+          </div>
+          <div class="sync-stats">
+            <span>{Math.round(syncProgress)}% Complete</span>
+          </div>
+        </div>
+      {/if}
+
       <div class="button-row">
         <button onclick={login} disabled={authStatus === 'Connected!'}>
           {authStatus === 'Connected!' ? 'Connected' : 'Connect to Google Drive'}
@@ -211,8 +244,28 @@
     </div>
 
     <div class="section">
+      <h3>2. Performance Settings</h3>
+      <div class="row settings-row">
+        <span class="label-box">Index Batch Size:</span>
+        <input 
+          type="number" 
+          bind:value={pendingBatchSize} 
+          min="100" 
+          max="10000" 
+          step="100" 
+          onkeydown={handleBatchKeydown}
+        />
+        <button class="submit-btn" onclick={saveBatchSize}>Submit</button>
+        {#if showSavedBatch}
+          <span class="saved-indicator">✓ Saved</span>
+        {/if}
+      </div>
+      <p class="help-text">Controls RAM usage during large scans. Smaller = less RAM, but slightly slower.</p>
+    </div>
+
+    <div class="section">
       <div class="header-with-status">
-        <h3>2. Local Items</h3>
+        <h3>3. Local Items</h3>
         {#if backupItems.length > 0}
           <button class="danger-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick={() => backupItems = []}>Clear All</button>
         {/if}
@@ -223,41 +276,40 @@
       </div>
 
       <div class="item-list">
-        {#if Object.keys(groupedItems).length === 0}
+        {#if backupItems.length === 0}
           <p class="empty-msg">No items selected yet.</p>
         {:else}
-          {#each Object.entries(groupedItems) as [parent, items]}
-            <div class="tree-group">
-              <div class="tree-parent">
-                <span class="icon">📁</span>
-                <span class="parent-path">{parent}</span>
+          {#each backupItems as item}
+            <div class="item-row">
+              <input type="checkbox" bind:checked={item.enabled} />
+              <span class="icon">{item.isDirectory ? '📁' : '📄'}</span>
+              <div class="item-info" title={item.path}>
+                <span class="item-path">{item.path}</span>
               </div>
-              <div class="tree-children">
-                {#each items as item}
-                  <div class="item-row tree-item">
-                    <input type="checkbox" bind:checked={item.enabled} />
-                    <span class="icon">{item.isDirectory ? '📁' : '📄'}</span>
-                    <div class="item-info">
-                      <span class="item-name">{item.path.split(/[\/\\]/).pop()}</span>
-                    </div>
-                    <button class="remove-btn" onclick={() => removeItem(item.path)}>×</button>
-                  </div>
-                {/each}
-              </div>
+              <button class="remove-btn" onclick={() => removeItem(item.path)}>×</button>
             </div>
           {/each}
         {/if}
       </div>
 
       <div class="footer">
-        <p>Backup Status: <strong>{backupStatus}</strong></p>
-        <button 
-          class="primary-btn" 
-          onclick={startMonitoring} 
-          disabled={backupItems.filter(i => i.enabled).length === 0 || authStatus !== 'Connected!'}
-        >
-          Start Monitoring
-        </button>
+        <div class="footer-left">
+          {#if isSyncing && currentFiles.length > 0}
+            <div class="syncing-files">
+              <span class="syncing-title">Syncing Now:</span>
+              {#each currentFiles.slice(0, 3) as file}
+                <div class="syncing-file-item">
+                  <span class="mini-icon">📄</span> {file}
+                </div>
+              {/each}
+              {#if currentFiles.length > 3}
+                <div class="syncing-more">... and {currentFiles.length - 3} more</div>
+              {/if}
+            </div>
+          {:else if authStatus === 'Connected!'}
+            <p class="status-msg">✅ Monitoring your files</p>
+          {/if}
+        </div>
       </div>
     </div>
   </div>
@@ -324,51 +376,146 @@ h1 {
   margin: 0;
 }
 
-.spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(0,0,0,0.1);
-  border-left-color: #007bff;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.prefix {
+.prefix, .label-box {
   font-weight: 700;
-  opacity: 0.6;
-  padding: 6px 4px 6px 10px;
-  background: #eee;
+  opacity: 0.8;
+  padding: 0 12px;
+  background: #f0f0f0;
   border-radius: 6px 0 0 6px;
   border: 1px solid #ccc;
   border-right: none;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  color: #333;
+  height: 36px;
+  box-sizing: border-box;
 }
 
 @media (prefers-color-scheme: dark) {
-  .prefix {
+  .prefix, .label-box {
     background: #3d3d3d;
-    border-color: #4d4d4d;
+    border-color: #555;
+    color: #fff;
+    opacity: 1;
   }
+}
+
+.row input[type="number"] {
+  width: 100px;
+  font-weight: 700;
+  padding: 0 12px;
+  border-radius: 0;
+  border: 1px solid #ccc;
+  height: 36px;
+  box-sizing: border-box;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.submit-btn {
+  border-radius: 0 6px 6px 0;
+  border: 1px solid #ccc;
+  border-left: none;
+  background: #eee;
+  color: #333;
+  font-weight: 600;
+  height: 36px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.submit-btn:hover {
+  background: #e0e0e0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .row input[type="number"] {
+    background-color: #1e1e1e;
+    color: #fff;
+    border-color: #555;
+  }
+  
+  .submit-btn {
+    background: #444;
+    border-color: #555;
+    color: #fff;
+  }
+  
+  .submit-btn:hover {
+    background: #555;
+  }
+}
+
+.row input[type="number"]::-webkit-outer-spin-button,
+.row input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .row {
   display: flex;
   gap: 0px;
+  align-items: stretch;
+}
+
+.settings-row {
+  align-items: center;
+}
+
+.saved-indicator {
+  color: #28a745;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-left: 12px;
+  animation: fade-in-out 1.5s ease-in-out forwards;
+}
+
+@keyframes fade-in-out {
+  0% { opacity: 0; transform: translateX(-5px); }
+  20% { opacity: 1; transform: translateX(0); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .row input {
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
   flex: 1;
+  background-color: #fff;
+  color: #000;
+  border: 1px solid #ccc;
+  padding: 8px 12px;
+  font-size: 0.9rem;
 }
 
-.help-text {
-  font-size: 0.75rem;
-  opacity: 0.6;
-  margin-top: 8px;
+@media (prefers-color-scheme: dark) {
+  .row input {
+    background-color: #1e1e1e;
+    color: #fff;
+    border-color: #555;
+  }
+}
+
+.danger-btn {
+  color: #ff4d4f;
+  border-color: #ffa39e;
+}
+
+.danger-btn:hover:not(:disabled) {
+  background-color: #fff1f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .danger-btn {
+    border-color: #822a2a;
+    background-color: transparent;
+  }
+  .danger-btn:hover:not(:disabled) {
+    background-color: #4c1d1d;
+  }
 }
 
 .button-row {
@@ -393,157 +540,55 @@ h1 {
   }
 }
 
-.tree-group {
-  border-bottom: 1px solid #eee;
-}
-
-@media (prefers-color-scheme: dark) {
-  .tree-group {
-    border-bottom-color: #3a3a3a;
-  }
-}
-
-.tree-parent {
-  padding: 8px 12px;
-  background: rgba(0,0,0,0.02);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: #666;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-@media (prefers-color-scheme: dark) {
-  .tree-parent {
-    background: rgba(255,255,255,0.03);
-    color: #aaa;
-  }
-}
-
-.tree-children {
-  padding-left: 12px;
-}
-
 .item-row {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
+  padding: 10px 12px;
   gap: 12px;
-}
-
-.tree-item {
-  border-left: 2px solid #eee;
-  margin-left: 8px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
 }
 
 @media (prefers-color-scheme: dark) {
-  .tree-item {
-    border-left-color: #3a3a3a;
+  .item-row {
+    border-bottom-color: rgba(255,255,255,0.05);
   }
-}
-
-.icon {
-  font-size: 1rem;
 }
 
 .item-info {
   flex: 1;
   display: flex;
-  flex-direction: column;
   min-width: 0;
+  overflow: hidden;
 }
 
-.item-name {
-  font-weight: 500;
-  font-size: 0.9rem;
+.item-path {
+  font-weight: 600;
+  font-size: 0.85rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: #333;
 }
 
-.remove-btn {
-  padding: 2px 8px;
-  font-size: 1.2rem;
-  color: #ff4d4f;
-  background: transparent;
-  border: none;
-}
-
-.remove-btn:hover {
-  background: #fff1f0;
-  border-radius: 4px;
+@media (prefers-color-scheme: dark) {
+  .item-path {
+    color: #fff;
+  }
 }
 
 .empty-msg {
   text-align: center;
-  padding: 24px;
+  padding: 32px;
   opacity: 0.5;
   font-style: italic;
-}
-
-.footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-top: 1px solid #eee;
-  padding-top: 16px;
-  margin-top: 8px;
+  color: #666;
 }
 
 @media (prefers-color-scheme: dark) {
-  .footer {
-    border-top-color: #3f3f3f;
-  }
-}
-
-.primary-btn {
-  background-color: #007bff;
-  color: #fff;
-  border: none;
-  font-weight: 600;
-}
-
-.primary-btn:hover:not(:disabled) {
-  background-color: #0069d9;
-}
-
-.primary-btn:disabled {
-  background-color: #ccc;
-  color: #888;
-}
-
-@media (prefers-color-scheme: dark) {
-  .primary-btn {
-    background-color: #0056b3;
-  }
-  .primary-btn:hover:not(:disabled) {
-    background-color: #004a99;
-  }
-  .primary-btn:disabled {
-    background-color: #444;
-    color: #888;
-  }
-}
-
-.danger-btn {
-  color: #ff4d4f;
-  border-color: #ffa39e;
-}
-
-.danger-btn:hover:not(:disabled) {
-  background-color: #fff1f0;
-}
-
-@media (prefers-color-scheme: dark) {
-  .danger-btn {
-    border-color: #822a2a;
-    background-color: transparent;
-  }
-  .danger-btn:hover:not(:disabled) {
-    background-color: #4c1d1d;
+  .empty-msg {
+    color: #aaa;
   }
 }
 
