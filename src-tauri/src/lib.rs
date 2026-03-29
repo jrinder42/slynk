@@ -189,6 +189,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Hide the popover when it loses focus
+            if let Some(popover) = app.get_webview_window("popover") {
+                let popover_handle = popover.clone();
+                popover.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(focused) = event {
+                        if !focused {
+                            let _ = popover_handle.hide();
+                        }
+                    }
+                });
+            }
+
             // Tray configuration
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit_item])?;
@@ -203,17 +215,17 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
+                    if let TrayIconEvent::Click { position, .. } = event {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
+                        if let Some(window) = app.get_webview_window("popover") {
                             let is_visible = window.is_visible().unwrap_or(false);
-                            let is_focused = window.is_focused().unwrap_or(false);
 
-                            if is_visible && is_focused {
+                            if is_visible {
                                 let _ = window.hide();
                             } else {
+                                // Try to position the window at the tray icon's location
+                                let _ = window.set_position(position);
                                 let _ = window.show();
-                                let _ = window.unminimize();
                                 let _ = window.set_focus();
                             }
                         }

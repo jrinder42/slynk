@@ -10,12 +10,26 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "slynk",
         "label": "main",
         "width": 800,
         "height": 600
+      },
+      {
+        "title": "slynk_popover",
+        "label": "popover",
+        "width": 300,
+        "height": 400,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "url": "/popover"
       }
     ],
     "security": {
