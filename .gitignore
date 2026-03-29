@@ -12,3 +12,4 @@ vite.config.ts.timestamp-*
 scrap.md
 GEMINI.md
 /src-tauri/binaries/
+*conductor/*
