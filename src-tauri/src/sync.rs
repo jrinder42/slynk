@@ -2,7 +2,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::mpsc;
 
@@ -139,6 +139,12 @@ struct SyncProgress {
 pub async fn trigger_sync(app: AppHandle, root_path: PathBuf, changed_path: PathBuf, remote_folder: String, batch_size: u32) -> Result<(), String> {
     let _ = app.emit("sync-start", ());
     
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some("Slynk - Syncing..."));
+        #[cfg(target_os = "macos")]
+        let _ = tray.set_title(Some(" (Syncing...)")); 
+    }
+
     let data_dir = app
         .path()
         .app_data_dir()
@@ -233,6 +239,13 @@ pub async fn trigger_sync(app: AppHandle, root_path: PathBuf, changed_path: Path
             }
         }
         let _ = app_inner.emit("sync-end", ());
+
+        // Change tray icon back to idle
+        if let Some(tray) = app_inner.tray_by_id("main-tray") {
+            let _ = tray.set_tooltip(Some("Slynk - Up to date"));
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_title(Some(""));
+        }
     });
 
     Ok(())
